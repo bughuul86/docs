@@ -1,0 +1,186 @@
+# Setup ILIAS e-learning platform on raspberry pi 3 (Raspberry Pi 3 Model B Rev 1.2)
+# with debian buster (Raspberry Pi OS Lite) image
+# docs used: https://docu.ilias.de/goto_docu_lm_367.html
+# https://websiteforstudents.com/install-ilias-e-learning-lms-on-ubuntu-18-04-16-04-with-apache2/
+
+
+
+# add external disk drive to store ilias and database files
+lsusb
+fdisk -l
+mkfs.ext4 /dev/sda1
+mkdir /data
+grep "data" /etc/fstab 
+   /dev/sda1 /data ext4 defaults 0 0
+mount -a
+mkdir /data/db /data/www
+
+
+
+# install apache2
+apt-get install apache2 -y
+systemctl stop apache2.service
+systemctl start apache2.service
+systemctl enable apache2.service
+
+
+
+# install mariadb
+apt-get install mariadb-server mariadb-client mariadb-backup -y
+mysql_secure_installation
+
+# install & configure php
+apt install php7.2 libapache2-mod-php7.2 php7.2-common php7.2-sqlite3 php7.2-mysql php7.2-gmp php7.2-curl php7.2-intl php7.2-mbstring php7.2-xmlrpc php7.2-gd php7.2-bcmath php7.2-xml php7.2-cli php7.2-zip -y
+cp /etc/php/7.2/apache2/php.ini /etc/php/7.2/apache2/php.ini.orig
+vi /etc/php/7.2/apache2/php.ini
+   file_uploads = On
+   allow_url_fopen = On
+   short_open_tag = On
+   memory_limit = 256M
+   upload_max_filesize = 100M
+   max_execution_time = 360
+   date.timezone = Europe/Berlin
+systemctl restart apache2.service
+
+# relocate apache2 directories
+mkdir /data/db /data/www
+mkdir /data/www/html
+echo "<?php phpinfo( ); ?>" > /data/www/html/phpinfo.php
+
+chown -R www-data:www-data /data/www
+cd /var/
+mv www _www
+ln -s /data/www .
+# test: http://pi/phpinfo.php
+
+# relocate mysql directories
+systemctl stop mysql
+cd /var/lib/
+mv mysql/ /data/db/
+chown mysql:mysql /data/db/
+ln -s /data/db/mysql .
+systemctl start mysql
+
+# create ilias db and user
+mysql -u root -p
+   CREATE DATABASE ilias CHARACTER SET utf8 COLLATE utf8_general_ci;
+   CREATE USER 'iliasdb'@'localhost' IDENTIFIED BY 'password';
+   GRANT ALL ON ilias.* TO 'iliasdb'@'localhost' WITH GRANT OPTION;
+   FLUSH PRIVILEGES;
+   EXIT;
+
+# download ilias
+cd /var/www/
+apt-get install git -y
+git clone https://github.com/ILIAS-eLearning/ILIAS.git ilias
+mkdir /var/www/files
+chown -R www-data:www-data /var/www/files
+chown -R www-data:www-data /var/www/ilias
+find /var/www/ilias -type f -exec chmod 644 {} \;
+find /var/www/ilias -type d -exec chmod 755 {} \;
+find /var/www/files -type f -exec chmod 644 {} \;
+find /var/www/files -type d -exec chmod 755 {} \;
+
+# apache2 config
+vi /etc/apache2/sites-available/ilias.conf
+   <VirtualHost *:80>
+        ServerAdmin root@pi
+        DocumentRoot /var/www/ilias
+        ServerName pi
+        ServerAlias pi
+   
+        <Directory /var/www/ilias/>
+             Options FollowSymlinks
+             AllowOverride All
+             Require all granted
+        </Directory>
+   
+        ErrorLog ${APACHE_LOG_DIR}/error.log
+        CustomLog ${APACHE_LOG_DIR}/access.log combined
+       
+        <Directory /var/www/ilias/>
+               RewriteEngine on
+               RewriteBase /
+               RewriteCond %{REQUEST_FILENAME} !-f
+               RewriteRule ^(.*) index.php [PT,L]
+       </Directory>
+   </VirtualHost>
+
+a2ensite ilias.conf
+a2enmod rewrite
+systemctl restart apache2
+
+# setup & config composer
+apt-get install composer -y
+cd /var/www/ilias/
+composer install --no-dev
+
+# run ilias setup
+cd /var/www/files
+mkdir log
+chown -R www-data:www-data log
+aptitude install imagemagick zip ghostscript ffmpeg phantomjs sysstat -y
+# optional: install clamav antivirus, but this wrecked my pi when uploading documents to ilias
+aptitude install clamav -y
+systemctl stop clamav-freshclam.service
+freshclam
+systemctl start clamav-freshclam.service
+
+http://pi/
+Data Directory outside Webspace:/data/www/files
+Path to Log File: /data/www/files/log/ilias.log
+Path to error log files: /data/www/files/log
+Timezone: GMT+1 Berlin
+Ghostscript Path: /usr/bin/ghostscript
+Path to ffmpeg: /usr/bin/ffmpeg
+Path to phantomjs: /usr/bin/phantomjs
+# optional
+# Virus Scanner: ClamAV
+# Scan Command: /usr/bin/clamscan
+# Clean Command: /usr/bin/clamscan --remove=yes
+
+Create New Client:
+ Database Type: MySQL 5.5.x or higher (MyISAM engine)
+  Client ID: ilias
+  Database Host: localhost
+  Database Name: ilias
+  Database User: iliasdb
+  Database Port:
+  Databasse Password: password
+  --> Create Database
+  --> Apply Hotfixes
+Languages:
+ German:
+  Installed: YES
+  Default: YES
+
+Login: root/homer
+
+
+# db backup
+root@pi:~# cat mysql_backup.sh 
+#!/bin/bash
+# Add the backup dir location, MySQL root password, MySQL and mysqldump location
+DATE=$(date +%Y%m%d)
+BACKUP_DIR="/data/db/backup"
+MYSQL_USER="root"
+MYSQL_PASSWORD="password"
+MYSQL=mysql
+
+# To create a new directory in the backup directory location based on the date
+mkdir -p $BACKUP_DIR/$DATE
+
+# To get a list of databases
+databases=`$MYSQL -u$MYSQL_USER -p$MYSQL_PASSWORD -e "SHOW DATABASES;" | grep -Ev "(Database|information_schema)"`
+
+# To dump each database in a separate file
+for db in $databases; do
+echo $db
+mysqldump --force --opt --skip-lock-tables --user=$MYSQL_USER -p$MYSQL_PASSWORD --databases $db | gzip > "$BACKUP_DIR/$DATE/$db.sql.gz"
+done
+
+# Delete the files older than 10 days
+find $BACKUP_DIR/* -type f -mtime +10 -exec rm -fR {} \;
+
+
+
