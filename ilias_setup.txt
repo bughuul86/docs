@@ -2,6 +2,7 @@
 # with debian buster (Raspberry Pi OS Lite) image
 # docs used: https://docu.ilias.de/goto_docu_lm_367.html
 # https://websiteforstudents.com/install-ilias-e-learning-lms-on-ubuntu-18-04-16-04-with-apache2/
+# as well as many others
 
 
 
